@@ -1,0 +1,42 @@
+# Cilium helm values，只記錄自己設定的部分，其餘都是 chart 預設值。
+# 匯出自目前 cluster：chart cilium-1.20.1，release revision 16，2026-09-04 更新。
+# 匯出指令：helm get values cilium -n kube-system -o yaml
+#
+# 安裝或更新：
+#   helm repo add cilium https://helm.cilium.io
+#   helm upgrade --install cilium cilium/cilium --version 1.20.1 \
+#     -n kube-system -f yaml/infra/cilium-values.yaml
+#
+# bobo 的 LoadBalancer 需要 l2announcements.enabled=true，這裡已經開了。
+autoDirectNodeRoutes: true
+bpf:
+  masquerade: true
+devices: eth0
+endpointRoutes:
+  enabled: true
+externalIPs:
+  enabled: true
+gatewayAPI:
+  enabled: true
+ipam:
+  mode: multi-pool
+  operator:
+    autoCreateCiliumPodIPPools:
+      default:
+        ipv4:
+          cidrs:
+          - 10.244.0.0/16
+          maskSize: 27
+ipv4NativeRoutingCIDR: 10.244.0.0/16
+k8sClientRateLimit:
+  burst: 20
+  qps: 10
+k8sServiceHost: kind-control-plane
+k8sServicePort: 6443
+kubeProxyReplacement: true
+l2announcements:
+  enabled: true
+operator:
+  rollOutPods: true
+rollOutCiliumPods: true
+routingMode: native
