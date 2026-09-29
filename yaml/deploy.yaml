@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: bobo
-        image: quay.io/cooloo9871/bobo
+        image: ghcr.io/braveantony/bobo:33d5d36
         ports:
         - containerPort: 3000
 ---

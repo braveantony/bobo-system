@@ -1,6 +1,6 @@
 # 從零開始建置 kind 環境
 
-從零建一個 kind cluster，裝好 Cilium，再把 bobo 和 MySQL 部署上去。做完之後，從主機開 http://10.89.0.225:3000 就能用 bobo。從其他電腦要透過遠端桌面連進來，見第 10 步。
+從零建一個 kind cluster，裝好 Cilium，再把 bobo 和 MySQL 部署上去。做完之後，從主機開 http://10.89.0.225:3000 就能用 bobo。從其他電腦要透過遠端桌面連進來，見第 9 步。
 
 ## 檔案
 
@@ -170,33 +170,19 @@ $K get ciliuml2announcementpolicy bobo-l2
 
 這一步一定要在部署 bobo 之前做。順序反過來的話，bobo 的 service 會一直拿不到 IP。
 
-### 7. build bobo 的 image 並載入 kind
+### 7. 部署 MySQL 和 bobo
 
-`yaml/deploy.yaml` 寫的 image 是 quay.io 上的 `cooloo9871/bobo`，那是 2026-03 的舊版，比目前的程式碼舊。所以這裡用 repo 裡的程式碼自己 build，tag 用 commit 編號。
-
-```sh
-TAG=localhost/bobo:$(git rev-parse --short HEAD)
-sudo podman build -t $TAG .
-sudo podman save $TAG -o /tmp/bobo.tar
-sudo KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive /tmp/bobo.tar --name kind
-sudo rm /tmp/bobo.tar
-```
-
-### 8. 部署 MySQL 和 bobo
+bobo 的 image 放在 GitHub Container Registry，`yaml/deploy.yaml` 已經指定好版本，直接套用就好。
 
 ```sh
-TAG=localhost/bobo:$(git rev-parse --short HEAD)
 $K create namespace bobo
 $K apply -n bobo -f yaml/mysql.yaml
-sed "s|image: quay.io/cooloo9871/bobo|image: $TAG\n        imagePullPolicy: IfNotPresent|" yaml/deploy.yaml \
-  | $K apply -n bobo -f -
+$K apply -n bobo -f yaml/deploy.yaml
 $K -n bobo rollout status sts/mysql --timeout=5m
 $K -n bobo rollout status deploy/bobo --timeout=2m
 ```
 
-`sed` 那一行會在套用時把 image 換成第 7 步 build 的版本，repo 裡的 deploy.yaml 不會被改到。
-
-### 9. 驗證
+### 8. 驗證
 
 ```sh
 $K -n bobo get svc bobo
@@ -214,7 +200,7 @@ service 的 EXTERNAL-IP 要是 10.89.0.225，curl 要回 200。接著用瀏覽�
 
 登入後應該會看到 `test` 資料庫。
 
-### 10. 用遠端桌面連到 bobo
+### 9. 用遠端桌面連到 bobo
 
 10.89.0.225 只有這台主機連得到，其他電腦看不到這個網段。要從自己的電腦用瀏覽器操作 bobo，可以在主機上跑一個有桌面的容器，再用遠端桌面連進去。
 
@@ -233,13 +219,15 @@ sudo podman exec desktop curl -s -o /dev/null -w "%{http_code}\n" http://10.89.0
 | 使用者名稱 | bigred |
 | 密碼 | bigred |
 
-登入後從左上角的應用程式選單打開 Firefox，網址輸入 http://10.89.0.225:3000，就會看到 bobo 的登入畫面。登入要填的值跟第 9 步一樣。
+登入後從左上角的應用程式選單打開 Firefox，網址輸入 http://10.89.0.225:3000，就會看到 bobo 的登入畫面。登入要填的值跟第 8 步一樣。
 
 `--shm-size=2gb` 是給 Firefox 用的共享記憶體，太小的話分頁容易當掉。
 
 ## 日常操作
 
-更新 Cilium 設定：改完 `cilium-values.yaml` 後執行
+### 更新 Cilium 設定
+
+改完 `cilium-values.yaml` 後執行：
 
 ```sh
 helm upgrade cilium cilium/cilium --version 1.20.1 -n kube-system \
@@ -247,9 +235,7 @@ helm upgrade cilium cilium/cilium --version 1.20.1 -n kube-system \
 $K -n kube-system rollout status ds/cilium --timeout=10m
 ```
 
-更新 bobo：程式碼改完並 commit 後，重做第 7 步和第 8 步。tag 會跟著 commit 編號變，pod 會自動換新 image。
-
-拆掉整個 cluster：
+### 拆掉整個 cluster
 
 ```sh
 sudo podman rm -f desktop
@@ -257,6 +243,26 @@ sudo KIND_EXPERIMENTAL_PROVIDER=podman kind delete cluster --name kind
 kubectl config delete-context kind-kind
 kubectl config delete-cluster kind-kind
 kubectl config delete-user kind-kind
+```
+
+### 發佈新版的 bobo image
+
+改了 bobo 的程式碼之後，要 build 新的 image 並推到 ghcr.io。
+
+推 image 到 ghcr.io 要用 classic personal access token，而且要勾 `write:packages`。fine-grained token 不支援 Container Registry，推送時會被拒絕。
+
+```sh
+IMG=ghcr.io/braveantony/bobo:$(git rev-parse --short HEAD)
+sudo podman build -t $IMG --label org.opencontainers.image.source=https://github.com/braveantony/bobo-system .
+echo "<classic token>" | sudo podman login ghcr.io -u braveantony --password-stdin
+sudo podman push $IMG
+```
+
+推完後把 `yaml/deploy.yaml` 的 image 改成新的 tag，commit 之後重新套用：
+
+```sh
+$K apply -n bobo -f yaml/deploy.yaml
+$K -n bobo rollout status deploy/bobo --timeout=2m
 ```
 
 ## 注意事項
