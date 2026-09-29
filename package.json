@@ -1,6 +1,6 @@
 {
   "name": "bobo",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "bobo \u2014 MySQL & PostgreSQL Web \u7ba1\u7406\u4ecb\u9762",
   "main": "server.js",
   "scripts": {
