@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: bobo
-        image: ghcr.io/braveantony/bobo:33d5d36
+        image: ghcr.io/braveantony/bobo:v0.0.1
         ports:
         - containerPort: 3000
 ---
