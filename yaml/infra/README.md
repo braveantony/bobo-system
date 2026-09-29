@@ -1,4 +1,4 @@
-# infra
+# 從零開始建置 kind 環境
 
 從零建一個 kind cluster，裝好 Cilium，再把 bobo 和 MySQL 部署上去。做完之後，從主機開 http://10.89.0.225:3000 就能用 bobo。從其他電腦要透過遠端桌面連進來，見第 10 步。
 
