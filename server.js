@@ -6,6 +6,7 @@ const mysql   = require('mysql2/promise');
 const { Client: PgClient } = require('pg');
 const cors    = require('cors');
 const path    = require('path');
+const { splitQuery, mysqlSplitterOptions, postgreSplitterOptions } = require('dbgate-query-splitter');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -20,6 +21,37 @@ function esc(name) {
   return safe;
 }
 function pgId(name) { return `"${String(name).replace(/"/g,'""')}"` }
+
+// ── 多段 SQL ───────────────────────────────────────
+// 拿掉註解後的開頭文字，只用來判斷是否為空、是哪種語句，不拿去執行
+function sqlHead(stmt) {
+  return stmt.replace(/\/\*[\s\S]*?\*\//g,' ').replace(/(--|#)[^\n]*/g,' ').trim();
+}
+// 用懂 SQL 語法的 splitter 切開，字串、註解、DELIMITER、$$ 裡的分號都不會被切斷
+function splitSql(sql, options) {
+  return splitQuery(sql, options).filter(s => sqlHead(s) !== '');
+}
+function writeMessage(stmt, affected) {
+  return /^(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(sqlHead(stmt))
+    ? `執行成功 — 影響 ${affected} 筆資料` : '執行成功';
+}
+// 在同一條連線依序執行，遇到錯誤就停。之前已執行的語句不會復原，除非在交易裡
+async function runStatements(res, statements, exec) {
+  if (!statements.length) return res.status(400).json({ error: '沒有可執行的 SQL' });
+  const results = [];
+  for (let i = 0; i < statements.length; i++) {
+    try {
+      results.push({ sql: statements[i], ...(await exec(statements[i])) });
+    } catch (err) {
+      console.error('[sql]', err.message);
+      return res.status(500).json({
+        error: statements.length > 1 ? `第 ${i + 1} 段執行失敗：${err.message}` : err.message,
+        failedIndex: i, failedSql: statements[i], total: statements.length, results,
+      });
+    }
+  }
+  res.json({ results });
+}
 
 // ── MySQL 連線 ─────────────────────────────────────
 async function getMysqlConn(cfg) {
@@ -159,17 +191,14 @@ app.post('/api/delete',wrapMysql(async(req,res,conn)=>{
 app.post('/api/sql',wrapMysql(async(req,res,conn)=>{
   const{database,sql}=req.body; if(!sql) return res.status(400).json({error:'請輸入 SQL'});
   if(database) await conn.query(`USE \`${esc(database)}\``);
-  const norm=sql.trim().toUpperCase();
-  const isRead=['SELECT','SHOW','DESCRIBE','DESC','EXPLAIN'].some(k=>norm.startsWith(k));
-  if(isRead){
-    const[rows,fields]=await conn.query(sql);
-    return res.json({type:'select',rows,columns:(fields||[]).map(f=>f.name)});
-  } else {
-    const[result]=await conn.query(sql);
-    const affected=result?.affectedRows??0,insertId=result?.insertId??null;
-    const isDDL=/^\s*(CREATE|DROP|ALTER|RENAME|TRUNCATE)/i.test(sql.trim());
-    return res.json({type:'write',affectedRows:affected,insertId,message:isDDL?'執行成功':`執行成功 — 影響 ${affected} 筆資料`});
-  }
+  await runStatements(res,splitSql(sql,mysqlSplitterOptions),async stmt=>{
+    let[rows,fields]=await conn.query(stmt);
+    // CALL 會回傳 [結果集, ..., ResultSetHeader]，取第一個結果集
+    if(Array.isArray(rows)&&Array.isArray(rows[0])){ rows=rows[0]; fields=fields?.[0]; }
+    if(Array.isArray(rows)) return {type:'select',rows,columns:(fields||[]).map(f=>f.name)};
+    const affected=rows?.affectedRows??0;
+    return {type:'write',affectedRows:affected,insertId:rows?.insertId||null,message:writeMessage(stmt,affected)};
+  });
 }));
 app.post('/api/database/create',wrapMysql(async(req,res,conn)=>{
   const{database,charset='utf8mb4',collation='utf8mb4_unicode_ci'}=req.body;
@@ -359,17 +388,13 @@ app.post('/api/pg/delete',wrapPg(async(req,res,conn)=>{
 app.post('/api/pg/sql',wrapPg(async(req,res,conn)=>{
   const{database:schema,sql}=req.body; if(!sql) return res.status(400).json({error:'請輸入 SQL'});
   if(schema) await conn.query(`SET search_path TO ${pgId(schema)},public`);
-  const norm=sql.trim().toUpperCase();
-  const isRead=['SELECT','TABLE ','EXPLAIN','WITH ','SHOW '].some(k=>norm.startsWith(k));
-  if(isRead){
-    const r=await conn.query(sql);
-    return res.json({type:'select',rows:r.rows,columns:r.fields?r.fields.map(f=>f.name):[]});
-  } else {
-    const r=await conn.query(sql);
+  await runStatements(res,splitSql(sql,postgreSplitterOptions),async stmt=>{
+    const r=await conn.query(stmt);
+    // 有回傳欄位就當查詢結果，包含 INSERT ... RETURNING
+    if(r.fields?.length) return {type:'select',rows:r.rows,columns:r.fields.map(f=>f.name)};
     const affected=r.rowCount??0;
-    const isDDL=/^\s*(CREATE|DROP|ALTER|RENAME|TRUNCATE)/i.test(sql.trim());
-    return res.json({type:'write',affectedRows:affected,insertId:null,message:isDDL?'執行成功':`執行成功 — 影響 ${affected} 筆資料`});
-  }
+    return {type:'write',affectedRows:affected,insertId:null,message:writeMessage(stmt,affected)};
+  });
 }));
 app.post('/api/pg/database/create',wrapPg(async(req,res,conn)=>{
   const{database:schema}=req.body; if(!schema) return res.status(400).json({error:'請輸入 Schema 名稱'});

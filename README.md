@@ -87,11 +87,10 @@ bobo/
 | `/api/insert` | 新增一筆資料 | `database`, `table`, `data` | `ok`, `insertId` |
 | `/api/update` | 更新資料 | `database`, `table`, `data`, `where` | `ok`, `affectedRows` |
 | `/api/delete` | 刪除資料 | `database`, `table`, `where` | `ok`, `affectedRows` |
-| `/api/sql` | 執行一段 SQL | `sql`，`database` 選填 | 見下方說明 |
+| `/api/sql` | 執行 SQL，可以一次多段 | `sql`，`database` 選填 | `results`，見「執行 SQL」 |
 
 - `page` 預設 1，`pageSize` 預設 50。`search` 會對所有欄位做 `LIKE '%關鍵字%'`。
 - `data` 和 `where` 都是 `{欄位名: 值}` 的物件。`data` 裡的空字串會存成 `NULL`。`where` 的多個條件用 `AND` 串接，不可以是空物件。
-- `/api/sql` 開頭是 `SELECT`、`SHOW`、`DESCRIBE`、`DESC`、`EXPLAIN` 時，回傳 `{type: "select", rows, columns}`。其他 SQL 也會執行，回傳 `{type: "write", affectedRows, insertId, message}`。一次只能執行一個 statement。
 
 ### MySQL：結構管理
 
@@ -125,7 +124,7 @@ PG 的端點在 `/api/pg/` 底下，名稱和參數都跟 MySQL 那組一樣。�
 | `/api/pg/insert` | 新增一筆資料 | `insertId` 回傳的是整筆新資料（`RETURNING *`），不是單一 ID |
 | `/api/pg/update` | 更新資料 | — |
 | `/api/pg/delete` | 刪除資料 | — |
-| `/api/pg/sql` | 執行一段 SQL | 有帶 `database` 時會先 `SET search_path TO <schema>, public`。開頭是 `SELECT`、`TABLE`、`EXPLAIN`、`WITH`、`SHOW` 時回傳 `select` 格式，`insertId` 固定是 `null` |
+| `/api/pg/sql` | 執行 SQL，可以一次多段 | 有帶 `database` 時會先 `SET search_path TO <schema>, public`。`insertId` 固定是 `null` |
 
 ### PostgreSQL：結構管理
 
@@ -144,6 +143,42 @@ PG 的端點在 `/api/pg/` 底下，名稱和參數都跟 MySQL 那組一樣。�
 | `/api/pg/indexes` | 列出索引 | 欄位名稱轉成跟 MySQL `SHOW INDEX` 一樣的格式，`Cardinality` 放的是 `idx_scan` |
 | `/api/pg/index/add` | 新增索引 | 執行 `CREATE INDEX ... ON` |
 | `/api/pg/index/drop` | 刪除索引 | — |
+
+### 執行 SQL
+
+`/api/sql` 和 `/api/pg/sql` 的 `sql` 可以一次放多段，用 `;` 分隔。後端用 [dbgate-query-splitter](https://www.npmjs.com/package/dbgate-query-splitter) 切開，再用同一條連線依序執行，所以 `USE`、`SET`、`START TRANSACTION ... COMMIT` 在同一次執行裡都有效。
+
+- 字串、註解裡的 `;` 不會被切開。MySQL 支援 `DELIMITER`，PG 支援 `$$` 包起來的函式本體。
+- 只有註解的段落會跳過。整段都是註解時回傳 400，`error` 是「沒有可執行的 SQL」。
+- 每一次執行都是新的連線。上一次執行的 `USE`、session 變數和沒 `COMMIT` 的交易，下一次都不會留著。
+
+成功時回傳每一段的結果，順序跟 SQL 一樣：
+
+```json
+{
+  "results": [
+    { "sql": "USE test", "type": "write", "affectedRows": 0, "insertId": null, "message": "執行成功" },
+    { "sql": "INSERT INTO accounts VALUES (1, 'Alice', 5000)", "type": "write", "affectedRows": 1, "insertId": null, "message": "執行成功 — 影響 1 筆資料" },
+    { "sql": "SELECT * FROM accounts", "type": "select", "rows": [{ "id": 1, "name": "Alice", "balance": 5000 }], "columns": ["id", "name", "balance"] }
+  ]
+}
+```
+
+有回傳欄位的語句算 `select`，例如 `SELECT`、`SHOW`、MySQL 的 `CALL`（取第一個結果集）、PG 的 `INSERT ... RETURNING`。其他都算 `write`。
+
+遇到錯誤時停在那一段，回傳 HTTP 500：
+
+```json
+{
+  "error": "第 2 段執行失敗：Duplicate entry '1' for key 'accounts.PRIMARY'",
+  "failedIndex": 1,
+  "failedSql": "INSERT INTO accounts VALUES (1, 'dup', 1)",
+  "total": 3,
+  "results": [ { "sql": "...", "type": "write", "...": "..." } ]
+}
+```
+
+`results` 是失敗前已經成功的段落，`failedIndex` 從 0 開始算。只有一段 SQL 時，`error` 不會加「第 1 段執行失敗：」。失敗前已成功的段落不會自動復原。如果它們在還沒 `COMMIT` 的交易裡，連線關閉時資料庫會 rollback。
 
 ### 欄位定義物件
 
@@ -183,7 +218,8 @@ PG 的端點在 `/api/pg/` 底下，名稱和參數都跟 MySQL 那組一樣。�
 
 - MySQL 的識別符（資料庫名、資料表名、欄位名）會經過白名單過濾，只保留英數字、`_`、`-`、`.` 和空白。PG 的識別符用雙引號包起來並跳脫。
 - 資料值都使用參數化查詢。
-- `/api/sql` 和 `/api/pg/sql` 會執行任何 SQL，包含寫入和 DDL。只看 SQL 開頭決定回傳格式，不會擋寫入操作。
+- `/api/sql` 和 `/api/pg/sql` 會執行任何 SQL，包含寫入和 DDL，不會擋寫入操作。
+- MySQL 連線維持 `multipleStatements: false`。多段 SQL 由後端切開後一段一段送出，不會把整串交給資料庫一次執行。
 - 每次請求獨立建立連線，不共用 connection pool。
 - 連線帳號密碼每次請求都放在 body 裡送出，後端也開了 CORS。請不要把 bobo 開放在不受信任的網路上。
 

@@ -224,6 +224,15 @@ td.act-cell{padding:3px 8px;min-width:72px;}
 .sidebar-db-type{font-size:9px;font-family:var(--mono);color:var(--text3);padding:4px 14px 2px;letter-spacing:.5px;text-transform:uppercase;}
 /* SQL WRITE RESULT */
 .sql-write-result{padding:16px 20px;font-family:var(--mono);font-size:13px;color:var(--accent);}
+/* 多段 SQL 的執行紀錄 */
+.sql-log{padding:8px 16px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:12px;}
+.sql-log-item{display:flex;align-items:baseline;gap:10px;padding:4px 0;min-width:0;}
+.sql-log-mark{color:var(--accent);flex:none;}
+.sql-log-no{color:var(--text3);flex:none;}
+.sql-log-sql{color:var(--text2);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);}
+.sql-log-msg{color:var(--text);flex:none;max-width:50%;}
+.sql-log-item.err .sql-log-mark,.sql-log-item.err .sql-log-msg{color:var(--danger);}
+.sql-log-note{color:var(--text3);padding:6px 0 2px;}
 /* SPINNER */
 .spin{width:16px;height:16px;border:2px solid rgba(255,255,255,.1);border-top-color:var(--accent);border-radius:50%;animation:sp .6s linear infinite;display:inline-block;}
 @keyframes sp{to{transform:rotate(360deg)}}
@@ -543,7 +552,7 @@ async function api(ep, body={}) {
     body: JSON.stringify({ config:S.config, ...body }),
   });
   const j = await r.json();
-  if (!r.ok) throw new Error(j.error||'未知錯誤');
+  if (!r.ok) { const err=new Error(j.error||'未知錯誤'); err.data=j; throw err; }
   return j;
 }
 
@@ -830,34 +839,72 @@ async function runSQL(){
   const sql=id('sqlEditor').value.trim(); if(!sql)return;
   setLoading(true);
   try {
-    const result = await api('sql',{database:S.currentDb,sql});
-    switchTab('data');
-    if (result.type==='select') {
-      S.sqlMode=true;
-      const fakeCols=result.columns.map(c=>({Field:c,Key:'',Type:''}));
-      const fakeRows=result.rows.map(r=>result.columns.map(c=>r[c]));
-      id('sqlResultBar').textContent=`查詢結果 — ${result.rows.length} 筆`;
-      id('sqlResultBar').classList.remove('hidden');
-      id('pag').classList.add('hidden');
-      id('tblCount').textContent=`${result.rows.length} 筆`;
-      renderRows(fakeRows,fakeCols);
-    } else {
-      // 寫入型 SQL (INSERT/UPDATE/DELETE/CREATE/DROP...)
-      S.sqlMode=false;
-      id('sqlResultBar').classList.add('hidden');
-      id('dataWrap').innerHTML=`<div class="sql-write-result">
-        <div style="font-size:18px;margin-bottom:8px">✓</div>
-        <div style="color:var(--text);margin-bottom:4px">${result.message}</div>
-        ${result.insertId ? `<div style="color:var(--text3)">INSERT ID: ${result.insertId}</div>` : ''}
-      </div>`;
-      id('pag').classList.add('hidden');
-      id('tblCount').textContent='';
-      toast(result.message,'ok');
-      // 若目前有選取資料表，自動重新載入資料
-      if (S.currentTable) { const _tbl=S.currentTable; setTimeout(()=>{ if(S.currentTable===_tbl&&!S.sqlMode) fetchRows(); },800); }
-    }
-  } catch(e){toast('SQL 錯誤：'+e.message,'err');}
+    const { results } = await api('sql',{database:S.currentDb,sql});
+    showSqlResults(results);
+    const last=results[results.length-1];
+    toast(results.length>1 ? `${results.length} 段 SQL 全部執行成功` : (last.type==='select' ? `查詢結果 ${last.rows.length} 筆` : last.message),'ok');
+  } catch(e){
+    // 多段 SQL 中途失敗時，把已執行的段落和失敗的那段一起顯示出來
+    const d=e.data;
+    if (d?.failedSql && d.total>1) showSqlResults(d.results||[], {sql:d.failedSql, error:e.message, skipped:d.total-d.failedIndex-1});
+    toast('SQL 錯誤：'+h(e.message),'err');
+  }
   setLoading(false);
+}
+
+// results 是後端依序執行的每一段結果；failed 是中途失敗的那一段
+function showSqlResults(results, failed=null){
+  switchTab('data');
+  id('pag').classList.add('hidden');
+  const total=results.length+(failed?1:0);
+  // 只有一段而且成功，維持原本的單一結果畫面
+  const log = total>1||failed ? sqlLogHtml(results, failed) : '';
+  const lastSelect=[...results].reverse().find(r=>r.type==='select');
+  const bar=id('sqlResultBar');
+  if (lastSelect) {
+    S.sqlMode=true;
+    const fakeCols=lastSelect.columns.map(c=>({Field:c,Key:'',Type:''}));
+    const fakeRows=lastSelect.rows.map(r=>lastSelect.columns.map(c=>r[c]));
+    const no=results.indexOf(lastSelect)+1;
+    bar.textContent = total>1 ? `第 ${no} 段的查詢結果 — ${lastSelect.rows.length} 筆` : `查詢結果 — ${lastSelect.rows.length} 筆`;
+    bar.classList.remove('hidden');
+    id('tblCount').textContent=`${lastSelect.rows.length} 筆`;
+    renderRows(fakeRows,fakeCols);
+    if (log) id('dataWrap').insertAdjacentHTML('afterbegin',log);
+    return;
+  }
+  S.sqlMode=false;
+  bar.classList.add('hidden');
+  id('tblCount').textContent='';
+  if (log) {
+    id('dataWrap').innerHTML=log;
+  } else if (results.length) {
+    const r=results[0];
+    id('dataWrap').innerHTML=`<div class="sql-write-result">
+      <div style="font-size:18px;margin-bottom:8px">✓</div>
+      <div style="color:var(--text);margin-bottom:4px">${h(r.message)}</div>
+      ${r.insertId ? `<div style="color:var(--text3)">INSERT ID: ${h(r.insertId)}</div>` : ''}
+    </div>`;
+  }
+  // 若目前有選取資料表，而且有成功的寫入，自動重新載入資料
+  if (S.currentTable && results.length) { const _tbl=S.currentTable; setTimeout(()=>{ if(S.currentTable===_tbl&&!S.sqlMode) fetchRows(); },800); }
+}
+
+function sqlLogHtml(results, failed){
+  const line=(no,ok,sql,msg)=>`<div class="sql-log-item ${ok?'':'err'}">
+    <span class="sql-log-mark">${ok?'✓':'✕'}</span><span class="sql-log-no">#${no}</span>
+    <code class="sql-log-sql" title="${h(sql)}">${h(sql.replace(/^(\s*--[^\n]*\n)+/,'').replace(/\s+/g,' ').trim())}</code>
+    <span class="sql-log-msg">${h(msg)}</span></div>`;
+  let html=results.map((r,i)=>line(i+1,true,r.sql,
+    r.type==='select' ? `${r.rows.length} 筆` : r.message+(r.insertId?`（ID ${r.insertId}）`:''))).join('');
+  if (failed) {
+    html+=line(results.length+1,false,failed.sql,failed.error.replace(/^第 \d+ 段執行失敗：/,''));
+    const notes=[];
+    if (failed.skipped>0) notes.push(`後面 ${failed.skipped} 段沒有執行。`);
+    if (results.length) notes.push('前面已成功的段落不會自動復原，除非它們在還沒 COMMIT 的交易裡。');
+    if (notes.length) html+=`<div class="sql-log-note">${notes.join('')}</div>`;
+  }
+  return `<div class="sql-log">${html}</div>`;
 }
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'&&document.activeElement?.id==='sqlEditor')runSQL();});
 
